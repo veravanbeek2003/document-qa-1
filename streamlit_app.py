@@ -1,53 +1,87 @@
 import streamlit as st
-from openai import OpenAI
+from together import Together
 
-# Show title and description.
-st.title("📄 Document question answering")
+def chunk_text(text, chunk_size=4000):
+    """Split text into chunks of a specified size."""
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+def summarize_chunk(client, chunk):
+    """Summarize a chunk of text using the Together API."""
+    messages = [
+        {
+            "role": "user",
+            "content": f"Summarize the following text briefly: {chunk}",
+        }
+    ]
+
+    response = client.chat.completions.create(
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        messages=messages,
+        max_tokens=200  # Limit the response size for brevity
+    )
+
+    summary = response.choices[0].message.content
+    return summary
+
+# Streamlit app code
+st.title("📄 Document Chatbot")
 st.write(
-    "Upload a document below and ask a question about it – GPT will answer! "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
+    "Upload a document below and ask a question about it. This chatbot uses Together's API to generate responses."
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
+api_key = st.text_input("Together API Key", type="password")
+
+if not api_key:
+    st.info("Please add your API key to continue.", icon="🗝️")
 else:
+    client = Together(api_key=api_key)
+    uploaded_file = st.file_uploader("Upload a document (.txt or .md)", type=("txt", "md"))
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-    # Let the user upload a file via `st.file_uploader`.
-    uploaded_file = st.file_uploader(
-        "Upload a document (.txt or .md)", type=("txt", "md")
-    )
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-    # Ask the user for a question via `st.text_area`.
-    question = st.text_area(
-        "Now ask a question about the document!",
-        placeholder="Can you give me a short summary?",
-        disabled=not uploaded_file,
-    )
+    if prompt := st.chat_input("Ask a question about the document"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if uploaded_file and question:
+        if uploaded_file:
+            document = uploaded_file.read().decode()
+            document_chunks = chunk_text(document)
+            summaries = []
 
-        # Process the uploaded file and question.
-        document = uploaded_file.read().decode()
-        messages = [
-            {
-                "role": "user",
-                "content": f"Here's a document: {document} \n\n---\n\n {question}",
-            }
-        ]
+            for chunk in document_chunks:
+                summary = summarize_chunk(client, chunk)
+                summaries.append(summary)
 
-        # Generate an answer using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            stream=True,
-        )
+            full_summary = " ".join(summaries)
 
-        # Stream the response to the app using `st.write_stream`.
-        st.write_stream(stream)
+            messages = [
+                {
+                    "role": "user",
+                    "content": f"Here's a summary of the document: {full_summary}\n\n---\n\n{prompt}",
+                }
+            ]
+
+            response = client.chat.completions.create(
+                model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                messages=messages,
+                stream=True
+            )
+
+            with st.chat_message("assistant"):
+                full_response = ""
+                response_placeholder = st.empty()
+                for chunk in response:
+                    if hasattr(chunk.choices[0], 'delta') and chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        response_placeholder.markdown(full_response + "▌")
+                response_placeholder.markdown(full_response)
+
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+        else:
+            st.warning("Please upload a document to ask questions about it.")
